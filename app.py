@@ -91,6 +91,16 @@ def init_db():
         FOREIGN KEY (assignment_id) REFERENCES assignments(id) ON DELETE CASCADE,
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
     )""")
+    run("""
+    CREATE TABLE IF NOT EXISTS students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        class_id INTEGER NOT NULL,
+        email TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(name, class_id),
+        FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
+    )""")
 
 init_db()
 
@@ -150,7 +160,25 @@ def sign_out():
         cookies.pop(k, None)
     cookies.save()
     st.rerun()
+    
+import smtplib
+from email.mime.text import MIMEText
 
+def send_email(to_email: str, subject: str, body: str):
+    sender = st.secrets["gmail"]["email"]
+    password = st.secrets["gmail"]["app_password"]  # use App Password
+
+    msg = MIMEText(body, "plain")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender, password)
+            server.sendmail(sender, [to_email], msg.as_string())
+    except Exception as e:
+        st.error(f"Error sending email: {e}")
 # -----------------------------
 # STUDENT Views
 # -----------------------------
@@ -242,12 +270,15 @@ def student_home():
         st.subheader("Profile")
         with st.form("student_profile"):
             new_name = st.text_input("Display name", value=name)
-            if st.form_submit_button("Update name"):
-                run("UPDATE students SET name=? WHERE id=?", (new_name, student_id))
+            email = fetchall_df("SELECT email FROM students WHERE id=?", (student_id,))
+            cur_email = email.iloc[0]["email"] if not email.empty else ""
+            new_email = st.text_input("Email (optional, for notifications)", value=cur_email)
+
+            if st.form_submit_button("Update profile"):
+                run("UPDATE students SET name=?, email=? WHERE id=?", (new_name, new_email, student_id))
                 cookies["student_name"] = new_name
                 cookies.save()
-                st.success("Updated!")
-
+                st.success("Profile updated!")
 # -----------------------------
 # -----------------------------
 # TEACHER Views
@@ -353,13 +384,22 @@ def teacher_assignments_tab(teacher_id:int):
         t = st.text_input("Title*")
         d = st.text_area("Description")
         due = st.date_input("Due date", value=None)
+        notify = st.checkbox("Notify students via email")
+
         if st.form_submit_button("Create"):
             if not t.strip():
                 st.error("Enter a title")
             else:
                 due_str = due.isoformat() if due else None
                 run("INSERT INTO assignments (class_id, title, description, due_date) VALUES (?,?,?,?)",
-                    (class_id, t, d, due_str))
+                (class_id, t, d, due_str))
+
+                if notify:
+                    students = fetchall_df("SELECT name, email FROM students WHERE class_id=? AND email IS NOT NULL", (class_id,))
+                    for _, s in students.iterrows():
+                    body = f"Hi {s['name']},\n\nA new assignment has been posted:\n\nTitle: {t}\nDescription: {d}\nDue: {due_str or 'N/A'}\n\nPlease log in to view more details."
+                    send_email(s["email"], f"New Assignment: {t}", body)
+
                 st.success("Assignment added")
                 st.rerun()
 
