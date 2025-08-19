@@ -30,8 +30,6 @@ if not cookies.ready():
 # -----------------------------
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    # On Streamlit Cloud this file lives alongside the app.
-    # It persists across sessions but may reset on redeploy; use Admin → Export for backups.
     return sqlite3.connect("school.db", check_same_thread=False)
 
 def run(query: str, params: tuple = ()):
@@ -78,7 +76,7 @@ def init_db():
         class_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         description TEXT DEFAULT '',
-        due_date TEXT, -- ISO date
+        due_date TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
     )""")
@@ -87,7 +85,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         assignment_id INTEGER NOT NULL,
         student_id INTEGER NOT NULL,
-        status TEXT DEFAULT 'pending', -- pending|done
+        status TEXT DEFAULT 'pending',
         completed_at TEXT,
         UNIQUE(assignment_id, student_id),
         FOREIGN KEY (assignment_id) REFERENCES assignments(id) ON DELETE CASCADE,
@@ -137,21 +135,21 @@ def set_student_cookie(student_id:int, class_id:int, name:str):
     cookies["student_id"] = str(student_id)
     cookies["class_id"] = str(class_id)
     cookies["student_name"] = name
-    cookies.set("login_ts", datetime.utcnow().isoformat(), expires_days=365)  # keep as-is per original pattern
+    cookies["login_ts"] = datetime.utcnow().isoformat()
     cookies.save()
 
 def set_teacher_cookie(teacher_id:int, username:str):
     cookies["role"] = "teacher"
     cookies["teacher_id"] = str(teacher_id)
     cookies["teacher_username"] = username
-    cookies.set("login_ts", datetime.utcnow().isoformat(), expires_days=365)  # keep as-is per original pattern
+    cookies["login_ts"] = datetime.utcnow().isoformat()
     cookies.save()
 
 def sign_out():
     for k in list(cookies.keys()):
         cookies.pop(k, None)
     cookies.save()
-    st.experimental_rerun()
+    st.rerun()
 
 # -----------------------------
 # STUDENT Views
@@ -171,11 +169,10 @@ def student_join_view():
             st.error("Couldn't find a class with that code.")
             return
         class_id = int(cl.iloc[0]["id"])
-        # Create or fetch student
         try:
             run("INSERT INTO students (name, class_id) VALUES (?,?)", (student_name, class_id))
         except sqlite3.IntegrityError:
-            pass  # student already exists in that class
+            pass
         strow = fetchall_df("SELECT id FROM students WHERE name=? AND class_id=?", (student_name, class_id))
         student_id = int(strow.iloc[0]["id"])
         set_student_cookie(student_id, class_id, student_name)
@@ -192,14 +189,12 @@ def student_home():
     if header_cols[3].button("Sign out"):
         sign_out()
 
-    # Class info
     cl = fetchall_df("SELECT name FROM classes WHERE id=?", (class_id,))
     if cl.empty:
         st.warning("Your class no longer exists. Please join again.")
         return
     st.caption(f"Class: {cl.iloc[0]['name']}")
 
-    # Assignments
     asg = fetchall_df("""
         SELECT a.id, a.title, a.description, a.due_date,
                COALESCE(s.status, 'pending') AS status,
@@ -235,13 +230,13 @@ def student_home():
                             except sqlite3.IntegrityError:
                                 run("UPDATE submissions SET status='done', completed_at=? WHERE assignment_id=? AND student_id=?",
                                     (datetime.utcnow().isoformat(), int(row["id"]), student_id))
-                            st.experimental_rerun()
+                            st.rerun()
                     else:
                         cols[0].write("✅ Done")
                         if cols[1].button("Undo", key=f"undo_{row['id']}"):
                             run("UPDATE submissions SET status='pending', completed_at=NULL WHERE assignment_id=? AND student_id=?",
                                 (int(row["id"]), student_id))
-                            st.experimental_rerun()
+                            st.rerun()
 
     with right:
         st.subheader("Profile")
@@ -254,291 +249,192 @@ def student_home():
                 st.success("Updated!")
 
 # -----------------------------
+# -----------------------------
 # TEACHER Views
 # -----------------------------
 def teacher_signup():
-    st.subheader("Create a Teacher Account")
-    with st.form("signup"):
-        username = st.text_input("Username *").strip()
-        pw = st.text_input("Password *", type="password")
-        pw2 = st.text_input("Confirm password *", type="password")
-        created = st.form_submit_button("Create account")
-    if created:
-        if not username or not pw or pw != pw2:
-            st.error("Please fill all fields and make sure passwords match.")
+    st.subheader("Teacher Sign Up")
+    with st.form("signup_form"):
+        username = st.text_input("Choose username*")
+        password = st.text_input("Choose password*", type="password")
+        submitted = st.form_submit_button("Sign Up")
+    if submitted:
+        if not username or not password:
+            st.error("Please enter username and password")
             return
-        pw_hash = hash_password(pw)
         try:
-            run("INSERT INTO teachers (username, password_hash) VALUES (?,?)", (username, pw_hash))
+            run("INSERT INTO teachers (username, password_hash) VALUES (?,?)",
+                (username, hash_password(password)))
+            st.success("Account created. Please log in.")
         except sqlite3.IntegrityError:
-            st.error("That username is taken.")
-            return
-        t = fetchall_df("SELECT id FROM teachers WHERE username=?", (username,))
-        set_teacher_cookie(int(t.iloc[0]["id"]), username)
-        st.success("Account created and you’re logged in!")
+            st.error("That username is already taken.")
 
 def teacher_login():
     st.subheader("Teacher Login")
-    with st.form("login"):
-        username = st.text_input("Username *").strip()
-        pw = st.text_input("Password *", type="password")
-        ok = st.form_submit_button("Sign in")
-    if ok:
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+    if submitted:
         row = fetchall_df("SELECT id, password_hash FROM teachers WHERE username=?", (username,))
-        if row.empty or not check_password(pw, row.iloc[0]["password_hash"]):
-            st.error("Invalid username or password.")
-            return
-        set_teacher_cookie(int(row.iloc[0]["id"]), username)
-        st.success("Welcome back!")
+        if row.empty or not check_password(password, row.iloc[0]["password_hash"]):
+            st.error("Invalid credentials")
+        else:
+            set_teacher_cookie(int(row.iloc[0]["id"]), username)
+            st.rerun()
 
 def teacher_dashboard():
-    teacher_id = int(cookies.get("teacher_id", "0"))
-    username = cookies.get("teacher_username", "Teacher")
-    top = st.columns([1, 1, 1, 1])
-    top[0].markdown(f"### 👋 Hello, **{username}**")
-    if top[3].button("Sign out"):
+    tid = int(cookies.get("teacher_id", "0"))
+    uname = cookies.get("teacher_username", "Teacher")
+
+    header_cols = st.columns([1, 2, 1])
+    header_cols[0].markdown(f"### 👋 Hi, **{uname}**")
+    if header_cols[2].button("Sign out"):
         sign_out()
 
+    tabs = st.tabs(["📚 Classes", "📝 Assignments", "👥 Students"])
+    with tabs[0]:
+        teacher_classes_tab(tid)
+    with tabs[1]:
+        teacher_assignments_tab(tid)
+    with tabs[2]:
+        teacher_students_tab(tid)
+
+def teacher_classes_tab(teacher_id:int):
     st.subheader("Your Classes")
-
-    # Create class
-    with st.form("create_class", clear_on_submit=True):
-        cname = st.text_input("New class name *", placeholder="e.g., Algebra 1 - Period 3")
-        create = st.form_submit_button("Create class")
-    if create:
-        acode = code(6)
-        run("INSERT INTO classes (teacher_id, name, access_code) VALUES (?,?,?)",
-            (teacher_id, cname, acode))
-        st.success(f"Class **{cname}** created. Access code: **{acode}**")
-
-    classes = fetchall_df("SELECT id, name, access_code, created_at FROM classes WHERE teacher_id=? ORDER BY id DESC",
-                          (teacher_id,))
-    if classes.empty:
-        st.info("No classes yet. Create one above.")
+    cl = fetchall_df("SELECT id, name, access_code FROM classes WHERE teacher_id=?", (teacher_id,))
+    if cl.empty:
+        st.info("You have no classes yet. Create one below.")
     else:
-        for _, row in classes.iterrows():
-            with st.expander(f"📚 {row['name']}  •  Code: {row['access_code']}"):
-                cid = int(row["id"])
-                tabs = st.tabs(["Assignments", "Students", "Settings"])
-                # Assignments Tab
-                with tabs[0]:
-                    with st.form(f"add_asg_{cid}", clear_on_submit=True):
-                        t = st.text_input("Title *", key=f"title_{cid}")
-                        d = st.text_area("Description", key=f"desc_{cid}")
-                        # FIX: Streamlit doesn't accept value=None for date_input.
-                        due_none = st.checkbox("No due date", value=True, key=f"due_none_{cid}")  # default: no due date
-                        due = None
-                        if not due_none:
-                            due = st.date_input("Due date", value=date.today(), key=f"due_{cid}")
-                        addbtn = st.form_submit_button("Add assignment")
-                    if addbtn:
-                        due_str = due.isoformat() if isinstance(due, date) else None
-                        run("INSERT INTO assignments (class_id, title, description, due_date) VALUES (?,?,?,?)",
-                            (cid, t, d, due_str))
-                        st.success("Assignment added.")
-                    asg = fetchall_df(
-                        "SELECT id, title, description, due_date FROM assignments WHERE class_id=? ORDER BY COALESCE(due_date, '9999-12-31') ASC, id DESC",
-                        (cid,))
-                    if not asg.empty:
-                        st.dataframe(asg, use_container_width=True)
-                        for _, a in asg.iterrows():
-                            with st.container(border=True):
-                                st.markdown(f"**{a['title']}**  •  Due: {a['due_date'] or '—'}")
-                                # Show completion table
-                                comp = fetchall_df("""
-                                    SELECT s.id as submission_id, stu.name as student, COALESCE(s.status,'pending') as status, s.completed_at
-                                    FROM students stu
-                                    LEFT JOIN submissions s ON s.student_id = stu.id
-                                        AND s.assignment_id = ?
-                                    WHERE stu.class_id = ?
-                                    ORDER BY stu.name ASC
-                                """, (int(a["id"]), cid))
-                                if comp.empty:
-                                    st.caption("_No students yet._")
-                                else:
-                                    # Toggle done/undo inline
-                                    cols = st.columns([1, 2, 2, 1])
-                                    cols[0].markdown("**Student**")
-                                    cols[1].markdown("**Status**")
-                                    cols[2].markdown("**Completed at**")
-                                    cols[3].markdown("**Action**")
-                                    for _, rr in comp.iterrows():
-                                        c = st.columns([1, 2, 2, 1])
-                                        c[0].write(rr["student"])
-                                        c[1].write("✅ done" if rr["status"] == "done" else "⏳ pending")
-                                        c[2].write(rr["completed_at"] or "—")
-                                        if rr["status"] != "done":
-                                            if c[3].button("Mark done", key=f"tdone_{a['id']}_{rr['student']}"):
-                                                # Insert or update
-                                                stuid = fetchall_df("SELECT id FROM students WHERE name=? AND class_id=?",
-                                                                    (rr["student"], cid)).iloc[0]["id"]
-                                                try:
-                                                    run("INSERT INTO submissions (assignment_id, student_id, status, completed_at) VALUES (?,?,?,?)",
-                                                        (int(a["id"]), int(stuid), "done", datetime.utcnow().isoformat()))
-                                                except sqlite3.IntegrityError:
-                                                    run("UPDATE submissions SET status='done', completed_at=? WHERE assignment_id=? AND student_id=?",
-                                                        (datetime.utcnow().isoformat(), int(a["id"]), int(stuid)))
-                                                st.experimental_rerun()
-                                        else:
-                                            if c[3].button("Undo", key=f"tundo_{a['id']}_{rr['student']}"):
-                                                stuid = fetchall_df("SELECT id FROM students WHERE name=? AND class_id=?",
-                                                                    (rr["student"], cid)).iloc[0]["id"]
-                                                run("UPDATE submissions SET status='pending', completed_at=NULL WHERE assignment_id=? AND student_id=?",
-                                                    (int(a["id"]), int(stuid)))
-                                                st.experimental_rerun()
+        for _, row in cl.iterrows():
+            with st.container(border=True):
+                st.markdown(f"**{row['name']}** — Code: `{row['access_code']}`")
+                if st.button("Delete", key=f"del_class_{row['id']}"):
+                    run("DELETE FROM classes WHERE id=?", (int(row['id']),))
+                    st.rerun()
 
-                # Students Tab
-                with tabs[1]:
-                    st.caption("Students appear as they join with your class code.")
-                    studs = fetchall_df("SELECT id, name, created_at FROM students WHERE class_id=? ORDER BY name ASC", (cid,))
-                    st.dataframe(studs, use_container_width=True)
+    with st.form("new_class"):
+        newname = st.text_input("Class name")
+        if st.form_submit_button("Create Class"):
+            if not newname.strip():
+                st.error("Enter a name")
+            else:
+                acc = code()
+                run("INSERT INTO classes (teacher_id, name, access_code) VALUES (?,?,?)",
+                    (teacher_id, newname.strip(), acc))
+                st.success(f"Created class {newname} with code {acc}")
+                st.rerun()
 
-                # Settings Tab
-                with tabs[2]:
-                    st.text_input("Class name", value=row["name"], key=f"cname_{cid}", disabled=True)
-                    st.text_input("Access code", value=row["access_code"], key=f"ccode_{cid}", disabled=True)
-                    cols = st.columns([1, 1, 3])
-                    if cols[0].button("Regenerate code", key=f"regen_{cid}"):
-                        new_code = code(6)
-                        run("UPDATE classes SET access_code=? WHERE id=?", (new_code, cid))
-                        st.success(f"New class code: **{new_code}**")
-                        st.experimental_rerun()
-                    if cols[1].button("Delete class", key=f"delclass_{cid}"):
-                        run("DELETE FROM classes WHERE id=?", (cid,))
-                        st.success("Class deleted.")
-                        st.experimental_rerun()
+def teacher_assignments_tab(teacher_id:int):
+    cl = fetchall_df("SELECT id, name FROM classes WHERE teacher_id=?", (teacher_id,))
+    if cl.empty:
+        st.info("No classes yet")
+        return
+    class_opts = dict(zip(cl["name"], cl["id"]))
+    cname = st.selectbox("Choose class", list(class_opts.keys()))
+    class_id = class_opts[cname]
+
+    asg = fetchall_df("SELECT * FROM assignments WHERE class_id=? ORDER BY id DESC", (class_id,))
+    st.subheader("Assignments")
+    if asg.empty:
+        st.write("None yet")
+    else:
+        for _, row in asg.iterrows():
+            with st.container(border=True):
+                st.markdown(f"**{row['title']}** (Due {row['due_date'] or 'N/A'})")
+                if row["description"]:
+                    st.caption(row["description"])
+                if st.button("Delete", key=f"del_asg_{row['id']}"):
+                    run("DELETE FROM assignments WHERE id=?", (int(row['id']),))
+                    st.rerun()
+
+    st.subheader("Create new assignment")
+    with st.form("new_asg"):
+        t = st.text_input("Title*")
+        d = st.text_area("Description")
+        due = st.date_input("Due date", value=None)
+        if st.form_submit_button("Create"):
+            if not t.strip():
+                st.error("Enter a title")
+            else:
+                due_str = due.isoformat() if due else None
+                run("INSERT INTO assignments (class_id, title, description, due_date) VALUES (?,?,?,?)",
+                    (class_id, t, d, due_str))
+                st.success("Assignment added")
+                st.rerun()
+
+def teacher_students_tab(teacher_id:int):
+    cl = fetchall_df("SELECT id, name FROM classes WHERE teacher_id=?", (teacher_id,))
+    if cl.empty:
+        st.info("No classes yet")
+        return
+    class_opts = dict(zip(cl["name"], cl["id"]))
+    cname = st.selectbox("Choose class", list(class_opts.keys()), key="stud_sel")
+    class_id = class_opts[cname]
+
+    st.subheader("Students")
+    studs = fetchall_df("SELECT id, name, created_at FROM students WHERE class_id=?", (class_id,))
+    if studs.empty:
+        st.write("No students yet")
+    else:
+        for _, row in studs.iterrows():
+            with st.container(border=True):
+                st.write(f"{row['name']} (joined {row['created_at'][:10]})")
+                if st.button("Remove", key=f"rem_stud_{row['id']}"):
+                    run("DELETE FROM students WHERE id=?", (int(row['id']),))
+                    st.rerun()
 
 # -----------------------------
 # ADMIN Views
 # -----------------------------
 def admin_panel():
     st.subheader("Admin Panel")
-    st.caption("Full manual editing ability. Handle with care.")
-    tabs = st.tabs(["Teachers", "Classes", "Students", "Assignments", "Submissions", "Export/Import", "About"])
-    # Teachers
+    tabs = st.tabs(["Teachers", "Classes", "Students", "Assignments", "Submissions"])
+
     with tabs[0]:
-        df = fetchall_df("SELECT id, username, password_hash, created_at FROM teachers ORDER BY id ASC")
-        edited = st.data_editor(df, use_container_width=True, disabled=["id"])
-        if st.button("Save Teachers"):
-            # upsert loop
-            for _, r in edited.iterrows():
-                run("UPDATE teachers SET username=?, password_hash=? WHERE id=?",
-                    (r["username"], r["password_hash"], int(r["id"])))
-            st.success("Saved.")
-        # Add / Delete
-        with st.form("add_teacher", clear_on_submit=True):
-            u = st.text_input("New username")
-            p = st.text_input("New password", type="password")
-            if st.form_submit_button("Add"):
-                if not u or not p:
-                    st.error("Username and password required.")
-                else:
-                    try:
-                        run("INSERT INTO teachers (username, password_hash) VALUES (?,?)", (u, hash_password(p)))
-                        st.success("Teacher added.")
-                    except sqlite3.IntegrityError:
-                        st.error("Username already exists.")
-        del_id = st.text_input("Delete teacher by id")
-        if st.button("Delete Teacher"):
-            if del_id.isdigit():
-                run("DELETE FROM teachers WHERE id=?", (int(del_id),))
-                st.success("Deleted.")
-                st.experimental_rerun()
+        df = fetchall_df("SELECT id, username, created_at FROM teachers")
+        st.dataframe(df)
+        if not df.empty:
+            id_to_del = st.selectbox("Delete teacher id", df["id"])
+            if st.button("Delete teacher"):
+                run("DELETE FROM teachers WHERE id=?", (int(id_to_del),))
+                st.rerun()
 
-    # Classes
     with tabs[1]:
-        df = fetchall_df("SELECT id, teacher_id, name, access_code, created_at FROM classes ORDER BY id ASC")
-        edited = st.data_editor(df, use_container_width=True, disabled=["id"])
-        if st.button("Save Classes"):
-            for _, r in edited.iterrows():
-                run("UPDATE classes SET teacher_id=?, name=?, access_code=? WHERE id=?",
-                    (int(r["teacher_id"]), r["name"], r["access_code"], int(r["id"])))
-            st.success("Saved.")
-        del_id = st.text_input("Delete class by id")
-        if st.button("Delete Class"):
-            if del_id.isdigit():
-                run("DELETE FROM classes WHERE id=?", (int(del_id),))
-                st.success("Deleted.")
-                st.experimental_rerun()
+        df = fetchall_df("SELECT id, name, access_code, teacher_id FROM classes")
+        st.dataframe(df)
+        if not df.empty:
+            id_to_del = st.selectbox("Delete class id", df["id"])
+            if st.button("Delete class"):
+                run("DELETE FROM classes WHERE id=?", (int(id_to_del),))
+                st.rerun()
 
-    # Students
     with tabs[2]:
-        df = fetchall_df("SELECT id, name, class_id, created_at FROM students ORDER BY id ASC")
-        edited = st.data_editor(df, use_container_width=True, disabled=["id"])
-        if st.button("Save Students"):
-            for _, r in edited.iterrows():
-                run("UPDATE students SET name=?, class_id=? WHERE id=?",
-                    (r["name"], int(r["class_id"]), int(r["id"])))
-            st.success("Saved.")
-        del_id = st.text_input("Delete student by id")
-        if st.button("Delete Student"):
-            if del_id.isdigit():
-                run("DELETE FROM students WHERE id=?", (int(del_id),))
-                st.success("Deleted.")
-                st.experimental_rerun()
+        df = fetchall_df("SELECT id, name, class_id FROM students")
+        st.dataframe(df)
+        if not df.empty:
+            id_to_del = st.selectbox("Delete student id", df["id"])
+            if st.button("Delete student"):
+                run("DELETE FROM students WHERE id=?", (int(id_to_del),))
+                st.rerun()
 
-    # Assignments
     with tabs[3]:
-        df = fetchall_df("SELECT id, class_id, title, description, due_date, created_at FROM assignments ORDER BY id ASC")
-        edited = st.data_editor(df, use_container_width=True, disabled=["id"])
-        if st.button("Save Assignments"):
-            for _, r in edited.iterrows():
-                run("UPDATE assignments SET class_id=?, title=?, description=?, due_date=? WHERE id=?",
-                    (int(r["class_id"]), r["title"], r["description"], r["due_date"], int(r["id"])))
-            st.success("Saved.")
-        del_id = st.text_input("Delete assignment by id")
-        if st.button("Delete Assignment"):
-            if del_id.isdigit():
-                run("DELETE FROM assignments WHERE id=?", (int(del_id),))
-                st.success("Deleted.")
-                st.experimental_rerun()
+        df = fetchall_df("SELECT id, title, class_id, due_date FROM assignments")
+        st.dataframe(df)
+        if not df.empty:
+            id_to_del = st.selectbox("Delete assignment id", df["id"])
+            if st.button("Delete assignment"):
+                run("DELETE FROM assignments WHERE id=?", (int(id_to_del),))
+                st.rerun()
 
-    # Submissions
     with tabs[4]:
-        df = fetchall_df("""SELECT id, assignment_id, student_id, status, completed_at
-                            FROM submissions ORDER BY id ASC""")
-        edited = st.data_editor(df, use_container_width=True, disabled=["id"])
-        if st.button("Save Submissions"):
-            for _, r in edited.iterrows():
-                run("UPDATE submissions SET assignment_id=?, student_id=?, status=?, completed_at=? WHERE id=?",
-                    (int(r["assignment_id"]), int(r["student_id"]), r["status"], r["completed_at"], int(r["id"])))
-            st.success("Saved.")
-        del_id = st.text_input("Delete submission by id")
-        if st.button("Delete Submission"):
-            if del_id.isdigit():
-                run("DELETE FROM submissions WHERE id=?", (int(del_id),))
-                st.success("Deleted.")
-                st.experimental_rerun()
-
-    # Export / Import
-    with tabs[5]:
-        st.markdown("#### Export CSVs")
-        for table in ["teachers", "classes", "students", "assignments", "submissions"]:
-            df = fetchall_df(f"SELECT * FROM {table}")
-            st.download_button(f"Download {table}.csv", df.to_csv(index=False).encode("utf-8"),
-                               file_name=f"{table}.csv", mime="text/csv")
-        st.markdown("#### Import CSVs (schema must match)")
-        up = st.file_uploader("Upload CSV to replace a table", type=["csv"])
-        tgt = st.selectbox("Target table", ["teachers", "classes", "students", "assignments", "submissions"])
-        if st.button("Replace with uploaded CSV"):
-            if up is None:
-                st.error("Please upload a CSV.")
-            else:
-                df = pd.read_csv(up)
-                conn = get_conn()
-                df.to_sql(tgt, conn, if_exists="replace", index=False)
-                st.success(f"Replaced `{tgt}` with uploaded CSV.")
-                st.experimental_rerun()
-
-    with tabs[6]:
-        st.markdown("""
-        - Passwords for **teachers** are **bcrypt hashed** (one-way) before storage.
-        - **Students** have no passwords; they stay signed in via encrypted cookies on their device.
-        - **Access codes** for classes do not expire (you can regenerate in Teacher → Settings).
-        - Storage: local `SQLite` file. On Streamlit Cloud, this persists across sessions but can reset on redeploys.
-          Use **Admin → Export** to keep backups. You can also mount a cloud DB later if needed.
-        """)
-
+        df = fetchall_df("SELECT id, assignment_id, student_id, status, completed_at FROM submissions")
+        st.dataframe(df)
+        if not df.empty:
+            id_to_del = st.selectbox("Delete submission id", df["id"])
+            if st.button("Delete submission"):
+                run("DELETE FROM submissions WHERE id=?", (int(id_to_del),))
+                st.rerun()
 # -----------------------------
 # Mobile install tips
 # -----------------------------
@@ -555,11 +451,7 @@ def mobile_install_tip():
 def main():
     user_banner()
     st.title("📝 Classwork & Homework Tracker")
-
-    # Sidebar Role Switcher
     role = st.sidebar.radio("Use as", ["Student", "Teacher", "Admin"])
-
-    # Auto-redirect if cookie role present
     cookie_role = cookies.get("role")
     if cookie_role == "student" and role == "Student":
         student_home()
@@ -569,12 +461,9 @@ def main():
         teacher_dashboard()
         mobile_install_tip()
         return
-
-    # Selected role views
     if role == "Student":
         student_join_view()
         mobile_install_tip()
-
     elif role == "Teacher":
         auth_tab = st.tabs(["Login", "Sign Up"])
         with auth_tab[0]:
@@ -582,8 +471,7 @@ def main():
         with auth_tab[1]:
             teacher_signup()
         mobile_install_tip()
-
-    else:  # Admin
+    else:
         pw = st.text_input("Admin password", type="password")
         if require_admin(pw):
             admin_panel()
