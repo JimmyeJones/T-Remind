@@ -150,7 +150,7 @@ def sign_out():
     for k in list(cookies.keys()):
         cookies.pop(k, None)
     cookies.save()
-    st.experimental_rerun()
+    st.rerun()
 
 # -----------------------------
 # STUDENT Views
@@ -234,13 +234,13 @@ def student_home():
                             except sqlite3.IntegrityError:
                                 run("UPDATE submissions SET status='done', completed_at=? WHERE assignment_id=? AND student_id=?",
                                     (datetime.utcnow().isoformat(), int(row["id"]), student_id))
-                            st.experimental_rerun()
+                            st.rerun()
                     else:
                         cols[0].write("✅ Done")
                         if cols[1].button("Undo", key=f"undo_{row['id']}"):
                             run("UPDATE submissions SET status='pending', completed_at=NULL WHERE assignment_id=? AND student_id=?",
                                 (int(row["id"]), student_id))
-                            st.experimental_rerun()
+                            st.rerun()
 
     with right:
         st.subheader("Profile")
@@ -373,14 +373,14 @@ def teacher_dashboard():
                                                 except sqlite3.IntegrityError:
                                                     run("UPDATE submissions SET status='done', completed_at=? WHERE assignment_id=? AND student_id=?",
                                                         (datetime.utcnow().isoformat(), int(a["id"]), int(stuid)))
-                                                st.experimental_rerun()
+                                                st.rerun()
                                         else:
                                             if c[3].button("Undo", key=f"tundo_{a['id']}_{rr['student']}"):
                                                 stuid = fetchall_df("SELECT id FROM students WHERE name=? AND class_id=?",
                                                                     (rr["student"], cid)).iloc[0]["id"]
                                                 run("UPDATE submissions SET status='pending', completed_at=NULL WHERE assignment_id=? AND student_id=?",
                                                     (int(a["id"]), int(stuid)))
-                                                st.experimental_rerun()
+                                                st.rerun()
 
                 # Students Tab
                 with tabs[1]:
@@ -397,11 +397,11 @@ def teacher_dashboard():
                         new_code = code(6)
                         run("UPDATE classes SET access_code=? WHERE id=?", (new_code, cid))
                         st.success(f"New class code: **{new_code}**")
-                        st.experimental_rerun()
+                        st.rerun()
                     if cols[1].button("Delete class", key=f"delclass_{cid}"):
                         run("DELETE FROM classes WHERE id=?", (cid,))
                         st.success("Class deleted.")
-                        st.experimental_rerun()
+                        st.rerun()
 
 # -----------------------------
 # ADMIN Views
@@ -438,7 +438,7 @@ def admin_panel():
             if del_id.isdigit():
                 run("DELETE FROM teachers WHERE id=?", (int(del_id),))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Classes
     with tabs[1]:
@@ -454,7 +454,7 @@ def admin_panel():
             if del_id.isdigit():
                 run("DELETE FROM classes WHERE id=?", (int(del_id),))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Students
     with tabs[2]:
@@ -470,7 +470,7 @@ def admin_panel():
             if del_id.isdigit():
                 run("DELETE FROM students WHERE id=?", (int(del_id),))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Assignments
     with tabs[3]:
@@ -486,7 +486,7 @@ def admin_panel():
             if del_id.isdigit():
                 run("DELETE FROM assignments WHERE id=?", (int(del_id),))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Submissions
     with tabs[4]:
@@ -503,7 +503,7 @@ def admin_panel():
             if del_id.isdigit():
                 run("DELETE FROM submissions WHERE id=?", (int(del_id),))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Export / Import
     with tabs[5]:
@@ -523,7 +523,7 @@ def admin_panel():
                 conn = get_conn()
                 df.to_sql(tgt, conn, if_exists="replace", index=False)
                 st.success(f"Replaced `{tgt}` with uploaded CSV.")
-                st.experimental_rerun()
+                st.rerun()
 
     with tabs[6]:
         st.markdown("""
