@@ -1,74 +1,72 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import bcrypt
 from datetime import datetime
+import hashlib
 from streamlit_cookies_manager import EncryptedCookieManager
 
 # ------------------ COOKIE MANAGER ------------------
 cookies = EncryptedCookieManager(
-    prefix="hwapp_", password="a_very_strong_secret_password"
+    prefix="hwapp_",  # cookie prefix
+    password="super-secret-cookie-key",  # change in production
 )
+
 if not cookies.ready():
     st.stop()
 
-# ------------------ DATABASE SETUP ------------------
+# ------------------ DATABASE INIT ------------------
 def init_db():
-    conn = sqlite3.connect("data.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS teachers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password_hash TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS classes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            access_code TEXT UNIQUE,
-            teacher_id INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            class_id INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS assignments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            description TEXT,
-            due_date TEXT,
-            class_id INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id INTEGER,
-            assignment_id INTEGER,
-            submitted INTEGER DEFAULT 0
-        )
-    """)
+    conn = sqlite3.connect("hw.db")
+    cur = conn.cursor()
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS teachers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password_hash TEXT
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS classes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        teacher_id INTEGER,
+        code TEXT UNIQUE
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        class_id INTEGER
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        description TEXT,
+        due_date TEXT,
+        class_id INTEGER
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER,
+        assignment_id INTEGER,
+        submitted INTEGER DEFAULT 0
+    )""")
+
     conn.commit()
     conn.close()
 
-def get_conn():
-    return sqlite3.connect("data.db")
-
 init_db()
 
-# ------------------ AUTH HELPERS ------------------
-def hash_password(password: str) -> bytes:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+# ------------------ HELPERS ------------------
+def hash_pw(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
 
-def check_password(password: str, hashed: bytes) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed)
+def fetchall_df(query, params=()):
+    conn = sqlite3.connect("hw.db")
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
 
 # ------------------ COOKIE HELPERS ------------------
 def set_student_cookie(student_id:int, class_id:int, name:str):
@@ -78,7 +76,6 @@ def set_student_cookie(student_id:int, class_id:int, name:str):
     cookies["student_name"] = name
     cookies["login_ts"] = datetime.utcnow().isoformat()
     cookies.save()
-    st.rerun()
 
 def set_teacher_cookie(teacher_id:int, username:str):
     cookies["role"] = "teacher"
@@ -86,10 +83,15 @@ def set_teacher_cookie(teacher_id:int, username:str):
     cookies["teacher_username"] = username
     cookies["login_ts"] = datetime.utcnow().isoformat()
     cookies.save()
-    st.rerun()
 
 def clear_cookies():
-    cookies.clear()
+    cookies["role"] = ""
+    cookies["teacher_id"] = ""
+    cookies["student_id"] = ""
+    cookies["class_id"] = ""
+    cookies["teacher_username"] = ""
+    cookies["student_name"] = ""
+    cookies["login_ts"] = ""
     cookies.save()
     st.rerun()
 
@@ -97,205 +99,207 @@ def clear_cookies():
 def student_join_view():
     st.header("Join a Class")
     name = st.text_input("Your Name")
-    code = st.text_input("Class Access Code")
-    if st.button("Join"):
+    code = st.text_input("Class Code")
+    if st.button("Join Class"):
         if not name or not code:
-            st.error("Enter both name and class code.")
+            st.error("Name and Class Code required.")
             return
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("SELECT id FROM classes WHERE access_code=?", (code,))
-        cl = c.fetchone()
-        if not cl:
-            st.error("Invalid class code.")
-            conn.close()
+        cl = fetchall_df("SELECT * FROM classes WHERE code=?", (code,))
+        if cl.empty:
+            st.error("Class not found.")
             return
-        class_id = cl[0]
-        # see if student already exists
-        c.execute("SELECT id FROM students WHERE name=? AND class_id=?", (name, class_id))
-        strow = c.fetchone()
-        if strow:
-            student_id = strow[0]
+        class_id = int(cl.iloc[0]["id"])
+        conn = sqlite3.connect("hw.db")
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM students WHERE name=? AND class_id=?", (name, class_id))
+        row = cur.fetchone()
+        if row:
+            student_id = row[0]
         else:
-            c.execute("INSERT INTO students (name, class_id) VALUES (?,?)", (name, class_id))
+            cur.execute("INSERT INTO students (name, class_id) VALUES (?,?)", (name, class_id))
             conn.commit()
-            student_id = c.lastrowid
+            student_id = cur.lastrowid
         conn.close()
         set_student_cookie(student_id, class_id, name)
-        st.success(f"Welcome to class! You’re now signed in as {name}")
+        st.success(f"Welcome to **{cl.iloc[0]['name']}**!")
+        st.toast("Login saved. You’ll stay signed in on this device.")
+        st.rerun()
 
 def student_dashboard():
     student_name = cookies.get("student_name")
-    class_id = int(cookies.get("class_id"))
-    student_id = int(cookies.get("student_id"))
-    st.header(f"Student Dashboard - {student_name}")
+    class_id = cookies.get("class_id")
+    if not student_name or not class_id:
+        st.error("Invalid session, please rejoin.")
+        clear_cookies()
+        return
+    st.header(f"📚 Student Dashboard - {student_name}")
 
-    conn = get_conn()
-    assignments = pd.read_sql_query(
-        "SELECT * FROM assignments WHERE class_id=? ORDER BY due_date",
-        conn, params=(class_id,)
-    )
-    submissions = pd.read_sql_query(
-        "SELECT * FROM submissions WHERE student_id=?",
-        conn, params=(student_id,)
-    )
-    conn.close()
-
+    assignments = fetchall_df("SELECT * FROM assignments WHERE class_id=?", (class_id,))
     if assignments.empty:
         st.info("No assignments yet.")
-        return
-
-    for _, row in assignments.iterrows():
-        st.subheader(row["title"])
-        st.write(row["description"])
-        st.write(f"Due: {row['due_date']}")
-        done = submissions[(submissions["assignment_id"] == row["id"]) & (submissions["submitted"] == 1)]
-        if not done.empty:
-            st.success("Submitted ✅")
-        else:
-            if st.button(f"Mark as submitted - {row['id']}", key=f"sub{row['id']}"):
-                conn = get_conn()
-                c = conn.cursor()
-                c.execute("INSERT INTO submissions (student_id, assignment_id, submitted) VALUES (?,?,1)",
-                          (student_id, row["id"]))
-                conn.commit()
-                conn.close()
-                st.success("Marked as submitted.")
-                st.rerun()
+    else:
+        for _, row in assignments.iterrows():
+            st.subheader(row["title"])
+            st.write(row["description"])
+            st.write(f"Due: {row['due_date']}")
+            sid = cookies.get("student_id")
+            subs = fetchall_df(
+                "SELECT * FROM submissions WHERE student_id=? AND assignment_id=?",
+                (sid, row["id"]),
+            )
+            submitted = (not subs.empty) and (subs.iloc[0]["submitted"] == 1)
+            if submitted:
+                st.success("Submitted ✅")
+            else:
+                if st.button(f"Mark as Submitted: {row['id']}", key=f"submit{row['id']}"):
+                    conn = sqlite3.connect("hw.db")
+                    cur = conn.cursor()
+                    if subs.empty:
+                        cur.execute(
+                            "INSERT INTO submissions (student_id, assignment_id, submitted) VALUES (?,?,1)",
+                            (sid, row["id"]),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE submissions SET submitted=1 WHERE id=?",
+                            (subs.iloc[0]["id"],),
+                        )
+                    conn.commit()
+                    conn.close()
+                    st.rerun()
 
 # ------------------ TEACHER VIEWS ------------------
 def teacher_register():
-    st.subheader("Teacher Registration")
-    username = st.text_input("Choose a username")
-    pw = st.text_input("Choose a password", type="password")
-    if st.button("Register"):
-        conn = get_conn()
-        c = conn.cursor()
-        try:
-            c.execute("INSERT INTO teachers (username,password_hash) VALUES (?,?)",
-                      (username, hash_password(pw)))
-            conn.commit()
-            st.success("Teacher registered! Please log in.")
-        except sqlite3.IntegrityError:
-            st.error("Username already exists.")
-        conn.close()
-
-def teacher_login():
-    st.subheader("Teacher Login")
+    st.header("Teacher Signup/Login")
     username = st.text_input("Username")
-    pw = st.text_input("Password", type="password")
-    if st.button("Login"):
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("SELECT id,password_hash FROM teachers WHERE username=?", (username,))
-        row = c.fetchone()
-        conn.close()
-        if row and check_password(pw, row[1]):
-            set_teacher_cookie(row[0], username)
+    password = st.text_input("Password", type="password")
+    if st.button("Signup/Login"):
+        if not username or not password:
+            st.error("Enter both username and password")
+            return
+        conn = sqlite3.connect("hw.db")
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM teachers WHERE username=?", (username,))
+        row = cur.fetchone()
+        h = hash_pw(password)
+        if row:
+            if row[2] != h:
+                st.error("Invalid password")
+                conn.close()
+                return
+            else:
+                teacher_id = row[0]
         else:
-            st.error("Invalid credentials.")
+            cur.execute("INSERT INTO teachers (username, password_hash) VALUES (?,?)", (username, h))
+            conn.commit()
+            teacher_id = cur.lastrowid
+        conn.close()
+        set_teacher_cookie(teacher_id, username)
+        st.success("Logged in!")
+        st.rerun()
 
 def teacher_dashboard():
-    teacher_username = cookies.get("teacher_username")
-    teacher_id = int(cookies.get("teacher_id"))
-    st.header(f"Teacher Dashboard - {teacher_username}")
+    st.header("👩‍🏫 Teacher Dashboard")
+    tid = cookies.get("teacher_id")
+    username = cookies.get("teacher_username")
+    if not tid:
+        st.error("Invalid session.")
+        clear_cookies()
+        return
+    st.write(f"Welcome, **{username}**")
 
     st.subheader("Your Classes")
-    conn = get_conn()
-    classes = pd.read_sql_query("SELECT * FROM classes WHERE teacher_id=?", conn, params=(teacher_id,))
-    conn.close()
-    st.table(classes[["id","name","access_code"]])
+    df = fetchall_df("SELECT * FROM classes WHERE teacher_id=?", (tid,))
+    if df.empty:
+        st.info("No classes yet.")
+    else:
+        st.table(df[["id", "name", "code"]])
 
-    st.subheader("Create New Class")
-    cname = st.text_input("Class name")
-    ccode = st.text_input("Class access code")
-    if st.button("Create class"):
-        conn = get_conn()
-        c = conn.cursor()
-        try:
-            c.execute("INSERT INTO classes (name,access_code,teacher_id) VALUES (?,?,?)",
-                      (cname, ccode, teacher_id))
+    cname = st.text_input("New Class Name")
+    ccode = st.text_input("New Class Code (give to students)")
+    if st.button("Create Class"):
+        if cname and ccode:
+            conn = sqlite3.connect("hw.db")
+            cur = conn.cursor()
+            cur.execute("INSERT INTO classes (name, teacher_id, code) VALUES (?,?,?)", (cname, tid, ccode))
             conn.commit()
-            st.success("Class created!")
+            conn.close()
+            st.success("Class created")
             st.rerun()
-        except sqlite3.IntegrityError:
-            st.error("Access code already in use.")
-        conn.close()
+        else:
+            st.error("Fill both fields")
 
-    st.subheader("Create Assignment")
-    class_choice = st.selectbox("Select class", classes["id"] if not classes.empty else [])
-    title = st.text_input("Assignment title")
-    desc = st.text_area("Assignment description")
-    due = st.date_input("Due date")
-    if st.button("Create assignment"):
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("INSERT INTO assignments (title,description,due_date,class_id) VALUES (?,?,?,?)",
-                  (title, desc, due.isoformat(), class_choice))
-        conn.commit()
-        conn.close()
-        st.success("Assignment created!")
-        st.rerun()
+    st.subheader("Assignments")
+    class_options = fetchall_df("SELECT * FROM classes WHERE teacher_id=?", (tid,))
+    if not class_options.empty:
+        class_choice = st.selectbox("Select Class", class_options["name"])
+        class_id = int(class_options[class_options["name"] == class_choice]["id"].iloc[0])
+        title = st.text_input("Assignment Title")
+        desc = st.text_area("Description")
+        due = st.date_input("Due Date")
+        if st.button("Add Assignment"):
+            conn = sqlite3.connect("hw.db")
+            cur = conn.cursor()
+            cur.execute("INSERT INTO assignments (title, description, due_date, class_id) VALUES (?,?,?,?)",
+                        (title, desc, str(due), class_id))
+            conn.commit()
+            conn.close()
+            st.success("Assignment added")
+            st.rerun()
+        st.write("Assignments in this class:")
+        st.table(fetchall_df("SELECT * FROM assignments WHERE class_id=?", (class_id,)))
 
 # ------------------ ADMIN VIEW ------------------
 def admin_view():
-    st.title("Admin Control Panel")
-    st.warning("Be careful. These edits apply globally.")
-    conn = get_conn()
-    tables = ["teachers","classes","students","assignments","submissions"]
-    for t in tables:
-        st.subheader(t)
-        df = pd.read_sql_query(f"SELECT * FROM {t}", conn)
-        st.dataframe(df)
-    conn.close()
+    st.header("Admin Panel")
+    pw = st.text_input("Admin Password", type="password")
+    if pw != "adminpass":  # change in production
+        st.error("Invalid admin password")
+        return
+    st.success("Welcome, Admin")
+    tab = st.radio("Select Table", ["teachers", "classes", "students", "assignments", "submissions"])
+    df = fetchall_df(f"SELECT * FROM {tab}")
+    st.dataframe(df)
 
-# ------------------ MOBILE INSTRUCTIONS ------------------
+# ------------------ MOBILE INSTALL TIP ------------------
 def mobile_install_tip():
-    st.markdown("""
-    ---
-    ### 📱 Add to Home Screen (iOS & Android)
-    - **iOS (Safari):** Tap Share → *Add to Home Screen*  
-    - **Android (Chrome):** Tap ⋮ menu → *Add to Home Screen*  
-    This makes the app behave like a standalone app.
-    ---
-    """)
+    with st.expander("📱 How to install this app on your phone"):
+        st.markdown("""
+**On iOS (Safari):**
+1. Tap the **Share** button.
+2. Scroll down and tap **Add to Home Screen**.
+3. Done! Now you can open it like an app.
+
+**On Android (Chrome):**
+1. Tap the **3-dot menu** in the top right.
+2. Tap **Add to Home screen**.
+3. Done! Now it behaves like an app.
+        """)
 
 # ------------------ MAIN ------------------
 def main():
-    st.title("📘 Homework Tracker")
+    st.title("Homework Tracker")
 
-    if st.sidebar.button("Logout"):
-        clear_cookies()
-
-    role = cookies.get("role")
-
-    if not role:
-        st.sidebar.title("Login / Register")
-        choice = st.sidebar.radio("Choose:", ["Student Join", "Teacher Login", "Teacher Register", "Admin"])
-        if choice == "Student Join":
+    if cookies.get("role") == "student":
+        student_dashboard()
+        mobile_install_tip()
+        if st.button("Logout"):
+            clear_cookies()
+    elif cookies.get("role") == "teacher":
+        teacher_dashboard()
+        mobile_install_tip()
+        if st.button("Logout"):
+            clear_cookies()
+    else:
+        role = st.radio("I am a...", ["Student", "Teacher", "Admin"])
+        if role == "Student":
             student_join_view()
             mobile_install_tip()
-        elif choice == "Teacher Login":
-            teacher_login()
-            mobile_install_tip()
-        elif choice == "Teacher Register":
+        elif role == "Teacher":
             teacher_register()
             mobile_install_tip()
-        elif choice == "Admin":
-            pw = st.text_input("Enter admin password", type="password")
-            if pw == "admin123":  # Change in production!
-                admin_view()
-            elif pw:
-                st.error("Invalid admin password.")
-            else:
-                st.info("Enter the admin password to proceed.")
-    else:
-        if role == "Student":
-            student_dashboard()
-            mobile_install_tip()
-        elif role == "Teacher":
-            teacher_dashboard()
-            mobile_install_tip()
+        elif role == "Admin":
+            admin_view()
 
 if __name__ == "__main__":
     main()
